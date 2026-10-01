@@ -10,6 +10,8 @@ const userSchema = new mongoose.Schema(
     isVerified: { type: Boolean, default: false },
     otpCode: { type: String, default: null },
     otpExpiresAt: { type: Date, default: null },
+    starterPlanActive: { type: Boolean, default: false },
+    starterActivatedAt: { type: Date, default: null },
 
     referralCode: { type: String, required: true, unique: true },
     referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },

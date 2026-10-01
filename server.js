@@ -12,11 +12,19 @@ const referralRoutes = require('./src/routes/referralRoutes');
 const withdrawalRoutes = require('./src/routes/withdrawalRoutes');
 const adCallbackRoutes = require('./src/routes/adCallbackRoutes');
 const adminRoutes = require('./src/routes/adminRoutes');
+const currencyRoutes = require('./src/routes/currencyRoutes');
+const paymentRoutes = require('./src/routes/paymentRoutes');
 
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({
+  verify(req, res, buffer) {
+    if (req.originalUrl.startsWith('/api/payments/webhook')) {
+      req.rawBody = Buffer.from(buffer);
+    }
+  },
+}));
 
 // Basic abuse protection on auth endpoints.
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30 });
@@ -31,6 +39,8 @@ app.use('/api/referrals', referralRoutes);
 app.use('/api/withdrawals', withdrawalRoutes);
 app.use('/api/ad-callbacks', adCallbackRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/currency', currencyRoutes);
+app.use('/api/payments', paymentRoutes);
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 

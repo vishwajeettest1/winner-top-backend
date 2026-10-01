@@ -8,6 +8,7 @@ const adRevenueLogSchema = new mongoose.Schema(
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     sourceType: { type: String, enum: ['ad_network', 'sponsored'], required: true },
     sourceId: { type: mongoose.Schema.Types.ObjectId, required: true },
+    businessDate: { type: String, required: true },
 
     grossRevenue: { type: Number, required: true, min: 0 },
     userShare: { type: Number, required: true, min: 0 },
@@ -30,5 +31,10 @@ adRevenueLogSchema.pre('validate', function (next) {
   }
   next();
 });
+
+adRevenueLogSchema.index(
+  { userId: 1, sourceType: 1, sourceId: 1, businessDate: 1 },
+  { unique: true, partialFilterExpression: { businessDate: { $type: 'string' } } }
+);
 
 module.exports = mongoose.model('AdRevenueLog', adRevenueLogSchema);
