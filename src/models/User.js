@@ -4,12 +4,17 @@ const userSchema = new mongoose.Schema(
   {
     mobileNumber: { type: String, required: true, unique: true, trim: true },
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
-    passwordHash: { type: String, required: true },
+    passwordHash: { type: String, required: true, select: false },
     profileImageUrl: { type: String, default: null },
 
     isVerified: { type: Boolean, default: false },
-    otpCode: { type: String, default: null },
+    otpCodeHash: { type: String, default: null, select: false },
     otpExpiresAt: { type: Date, default: null },
+    otpAttempts: { type: Number, default: 0 },
+    otpSentAt: { type: Date, default: null },
+    otpWindowStartedAt: { type: Date, default: null },
+    otpSendCount: { type: Number, default: 0 },
+    otpChannel: { type: String, enum: ['email', 'sms'], default: 'email' },
     starterPlanActive: { type: Boolean, default: false },
     starterActivatedAt: { type: Date, default: null },
 

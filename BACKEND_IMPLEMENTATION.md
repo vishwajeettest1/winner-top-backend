@@ -21,9 +21,9 @@ The detailed original contracts and acceptance criteria are in [BACKEND_REQUIREM
 
 | Capability | Current backend status | Relevant implementation |
 |---|---|---|
-| Registration and password hashing | Partial | `authController` creates users and hashes passwords with bcrypt |
-| OTP verification | Partial | Six-digit OTP and 10-minute expiry; delivery, attempt limits, and hashed OTP storage are absent |
-| User and admin authentication | Partial | Bearer JWT plus database role check; user/admin token separation and refresh rotation are absent |
+| Registration and password hashing | Implemented | Validates email, E.164-normalizes phone numbers, enforces an 8-72 byte password range, and uses bcrypt cost 12 |
+| OTP verification | Implemented, provider-configured | Cryptographically random six-digit OTP, bcrypt hash at rest, 10-minute expiry, five attempts, 60-second resend cooldown, five sends per hour, and SMTP/Twilio delivery |
+| User and admin authentication | Implemented | Separate 15-minute access-token audiences/secrets, hashed refresh tokens, rotation, reuse-family revocation, and logout revocation |
 | USD-to-INR currency quote | Partial | `GET /api/currency/usd-to-inr` gets and caches a server-side USD/INR rate for one hour; payment and payout settlement are not integrated |
 | `$25` payment and starter activation | Partial | Razorpay order, checkout verification, signed webhook, payment records, and one-time starter credit are implemented; account test keys and end-to-end verification are still required |
 | Wallet balance | Partial | Per-user mutable MongoDB wallet plus immutable, idempotent reward/payment credit entries; withdrawal and adjustment entries are not wired |
@@ -40,7 +40,7 @@ The detailed original contracts and acceptance criteria are in [BACKEND_REQUIREM
 
 ## Runtime And Architecture
 
-The application is an Express 4 service using Mongoose and MongoDB. `server.js` loads environment variables, installs CORS and JSON middleware, retains raw request bytes for the Razorpay webhook route, applies rate limits to authentication, payment creation/verification, and admin login, mounts API routers, exposes `GET /health`, and connects to MongoDB before listening. The default port is `5000`; the default local database is `mongodb://localhost:27017/streamearn`.
+The application is an Express 4 service using Mongoose and MongoDB. `server.js` loads environment variables, installs CORS and JSON middleware, retains raw request bytes for the Razorpay webhook route, applies rate limits to authentication, payment creation/verification, and admin login, mounts API routers, exposes `GET /health`, and connects to MongoDB before listening. The default port is `5000`; transactional flows require a replica-set MongoDB URI such as `mongodb://localhost:27017/streamearn?replicaSet=rs0`.
 
 Request flow:
 
@@ -53,7 +53,8 @@ Main data models:
 
 | Model | Current purpose |
 |---|---|
-| `User` | Email, mobile, password hash, verification/OTP state, starter activation, referral attribution/code, status, and role |
+| `User` | Email, normalized mobile, password hash, OTP hash/attempt/send state, starter activation, referral attribution/code, status, and role |
+| `RefreshToken` | Hashed opaque refresh token, user/admin role, family ID, expiry, consumption, replacement, and revocation state |
 | `Wallet` | Mutable USD total, video and referral earnings, pending withdrawal, and seven-day request-window timestamps; one per user |
 | `WalletTransaction` | Immutable USD credit/debit record with type, amount, status, and unique per-user/type/reference key |
 | `Payment` | Fixed starter-plan USD price, INR paise quote, exchange-rate snapshot, Razorpay order/payment IDs, idempotency key, state, and expiry |
@@ -74,12 +75,18 @@ Protected requests use `Authorization: Bearer <JWT>`. Responses below describe t
 
 | Method and path | Current behavior |
 |---|---|
-| `POST /api/auth/register` | Accepts `mobileNumber`, `email`, `password`, and optional `referralCode`; creates an unverified user. Returns `userId` and, outside production, `devOtp`. OTP is not actually sent. |
-| `POST /api/auth/verify-otp` | Accepts `userId` and `otpCode`; validates the saved code/expiry, marks the account verified, creates an empty wallet, and returns a JWT. |
-| `POST /api/auth/login` | Accepts `email` and `password`; returns a JWT for a verified, active account. |
-| `GET /api/user/profile` | Returns the current user document excluding `passwordHash` and `otpCode`. Review the exposed fields before treating this as a stable public profile contract. |
+| `POST /api/auth/register` | Accepts `mobileNumber`, `email`, `password`, optional `referralCode`, and optional `otpChannel` (`email` by default or `sms`); normalizes/validates inputs, hashes the password, stores only a bcrypt OTP hash, and delivers the code. Response contains `userId` and expiry, never the OTP. |
+| `POST /api/auth/verify-otp` | Accepts `userId` and six-digit `otpCode`; atomically consumes a valid nonexpired code, marks the account verified, creates the wallet, and issues user access/refresh tokens. |
+| `POST /api/auth/resend-otp` | Accepts `userId` and optional `otpChannel`; enforces cooldown and hourly send caps, then replaces the one-time code/hash. |
+| `POST /api/auth/login` | Accepts `email` and `password`; returns a short-lived user access token and opaque refresh token for a verified active user account. |
+| `POST /api/auth/refresh` | Accepts `{ "refreshToken": "..." }`; consumes and rotates the refresh token, keeps the same user/admin role and family, and revokes the family if a used token is replayed. |
+| `POST /api/auth/logout` | Accepts `{ "refreshToken": "..." }` and revokes that refresh token. Existing access tokens expire within their short TTL. |
+| `POST /api/admin/login` | Issues a separate admin access/refresh token pair only for an active admin account. |
+| `GET /api/user/profile` | Returns safe user profile fields, excluding password hash and OTP lifecycle metadata. |
 
-The implementation does not enforce OTP attempt limits, does not hash the OTP, and uses `Math.random()` for OTP generation. Registration inputs have minimal validation beyond required-field and duplicate checks. Integrate an OTP provider, use a cryptographically secure generator, persist only a protected OTP representation, rate-limit verification/resend, and define resend and lockout behavior before production.
+OTP delivery requires SMTP configuration for email or Twilio configuration for SMS. Registration defaults to email; the endpoint never returns an OTP. Resend is limited to one request per minute and five sends per rolling hour; verification allows five attempts per code. Password hashes use bcrypt cost 12 and reject passwords longer than bcrypt's 72-byte input limit. Generate separate, random `JWT_USER_SECRET` and `JWT_ADMIN_SECRET` values of at least 32 characters. Store refresh tokens only as SHA-256 hashes; access tokens are role/audience-bound and expire after 15 minutes by default.
+
+When upgrading a database created by the previous scaffold, run `npm run migrate-auth` once before deploying. It removes legacy plaintext `otpCode` values and invalidates any old OTP so an unverified user must request a fresh code.
 
 ### Video Catalog And Rewards
 
@@ -155,7 +162,7 @@ Do not enable ad-network rewards until callback signatures are verified accordin
 
 ### Admin
 
-`POST /api/admin/login` issues a JWT for an active user with the admin role. Other admin routes pass through `requireAuth` and `requireAdmin`.
+`POST /api/admin/login` issues an admin-audience token signed with `JWT_ADMIN_SECRET`. Admin routes validate this audience and the database role; regular user tokens cannot pass admin middleware. User API routes accept only the user audience. Admin access/refresh sessions use the same rotation/reuse-detection flow, but retain the admin role.
 
 Current admin API:
 
@@ -172,13 +179,13 @@ Current admin API:
 | `PUT /api/admin/withdrawals/:id` | Accept `{ "action": "APPROVE" }` or `{ "action": "REJECT", "rejectionReason": "..." }`; approval marks the record paid |
 | `PUT /api/admin/settings/referral-share` | Returns `501`; settings persistence is not implemented |
 
-`npm run create-admin` creates the first admin using `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Admin and user login currently issue the same JWT shape; authorization depends on reloading the user and checking the database role. Admin actions are not written to a dedicated audit log. Admin create/update handlers also pass request bodies directly into Mongoose and need allowlisted field validation.
+`npm run create-admin` creates the first admin using `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Admin actions are not written to a dedicated audit log. Admin create/update handlers also pass request bodies directly into Mongoose and need allowlisted field validation.
 
 ## Frontend Requirement Coverage
 
 | Frontend requirement | Backend support today | Work still required |
 |---|---|---|
-| R1: registration, verification, full video watch, referral importance | Registration, OTP check, referral attribution, and completion endpoint exist | OTP provider and secure lifecycle; full-watch verification; active-plan reward gating |
+| R1: registration, verification, full video watch, referral importance | Registration, SMTP/Twilio OTP, verification, referral attribution, and completion endpoint exist | Configure delivery provider; full-watch verification; active-plan reward gating |
 | R2: fixed `$25` start amount | Razorpay order and verified starter activation paths exist | Configure test keys; complete end-to-end gateway tests and refund/reconciliation operations |
 | R3: wallet balance and immediate reward reflection | Balance endpoint, reward/payment credits, and wallet transaction listing exist | Ledger every balance change, reconcile aggregate wallet, and use decimal-safe accounting |
 | R4: secure referral link | Referral code and link are returned | Use configured public URL, validate attribution rules, mitigate abuse |
@@ -209,7 +216,7 @@ Keep the frontend's local presentation state separate from financial truth. Do n
 Recommended order, with money correctness and abuse prevention first:
 
 1. **Define contracts and money policy.** Confirm currency, decimal precision, fixed starter product/price, business timezone, referral qualification/commission, and whether seven days means a request deadline or payout-review period. Document stable request/response schemas.
-2. **Harden request and auth handling.** Add schema validation, safe error responses, OTP delivery/expiry/attempt limits, secure OTP generation and storage, verification/resend rate limits, password policy, token lifetime/refresh strategy, restricted CORS, and admin audit records.
+2. **Finish auth hardening.** Add shared schema validation and safe error responses, configure SMTP/Twilio in the deployment, add account recovery/MFA if required, restrict CORS, and audit privileged admin actions.
 3. **Verify and complete payments.** Razorpay order creation, signature verification, webhook handling, and one-time starter activation are implemented. Configure test credentials and a reachable webhook URL; test expiry, retries, duplicate and late captures; add refunds and reconciliation before production.
 4. **Make financial accounting authoritative.** The ledger covers video, referral, and starter-payment credits. Add immutable entries for withdrawal debits/refunds and administrative adjustments, decimal-safe amounts, and balance reconciliation. Migrate direct wallet mutations carefully.
 5. **Secure video reward issuance.** Issue server-side watch sessions; verify actual completion/provider callbacks; establish timezone-aware daily windows; atomically enforce cap and deduplication; gate rewards on confirmed starter eligibility if that remains the product rule.
@@ -221,11 +228,12 @@ Recommended order, with money correctness and abuse prevention first:
 ## Security And Reliability Gaps To Resolve
 
 - `cors()` currently allows the default broad origin policy; production should allow only known frontend origins.
-- Rate limiting is applied to auth routes and admin login only. OTP verification, callbacks, reward, referral, and withdrawal paths need appropriate abuse protection.
+- Rate limiting is applied to auth routes, payment order/verification, and admin login. Callbacks, reward, referral, and withdrawal paths still need appropriate abuse protection.
 - There is no general request body/schema validation, and some admin routes accept arbitrary request bodies.
 - Error handlers/controllers sometimes return raw `err.message`; production responses should not reveal internal details.
-- The JWT default lifetime is seven days and no refresh-token rotation is implemented.
-- OTPs are stored in plaintext and the development OTP is returned whenever `NODE_ENV` is not exactly `production`.
+- User/admin JWT signing secrets must be independently provisioned and rotated; current access tokens live 15 minutes and refresh tokens rotate, but there is no device/session management UI or administrative session-revocation workflow.
+- OTP delivery is provider-backed but depends on SMTP/Twilio configuration. There is no provider failover or delivery monitoring; API responses do not disclose OTP values.
+- Refresh tokens are returned in JSON for client-managed storage. Browser clients should use secure, HTTP-only cookie handling or another appropriately protected storage strategy.
 - Financial operations span multiple non-transactional writes; duplicate or concurrent requests can leave inconsistent balances, logs, or campaign spend.
 - Amounts use floating-point `Number`; use a decimal-safe representation and explicit currency/rounding rules.
 - There is no general audit log, payment event store, idempotency-key store, or automated test suite.

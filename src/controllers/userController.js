@@ -1,5 +1,13 @@
 async function getProfile(req, res) {
-  const { passwordHash, otpCode, ...safeUser } = req.user.toObject();
+  const {
+    passwordHash,
+    otpCodeHash,
+    otpAttempts,
+    otpSentAt,
+    otpWindowStartedAt,
+    otpSendCount,
+    ...safeUser
+  } = req.user.toObject();
   return res.json({ user: safeUser });
 }
 

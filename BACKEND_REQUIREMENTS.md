@@ -25,7 +25,8 @@ Required server configuration should include:
 
 ```text
 DATABASE_URL=
-JWT_SECRET=
+JWT_USER_SECRET=
+JWT_ADMIN_SECRET=
 CLIENT_ORIGIN=
 PAYMENT_PROVIDER=
 PAYMENT_KEY_ID=
@@ -38,8 +39,8 @@ EMAIL_PROVIDER=
 Security requirements:
 
 - Hash passwords with a strong password-hashing algorithm.
-- Use short-lived access tokens and refresh-token rotation where appropriate.
-- Store user and admin tokens separately and enforce roles server-side.
+- Use short-lived user and admin access tokens signed with distinct secrets, plus refresh-token rotation and reuse detection.
+- Store user and admin refresh sessions separately by role and enforce token audience and role server-side.
 - Validate every request body, query parameter, and identifier.
 - Apply rate limits to login, registration, OTP, payment, reward, referral, and withdrawal endpoints.
 - Verify payment signatures/webhooks only on the server.

@@ -5,16 +5,17 @@ const SponsoredContent = require('../models/SponsoredContent');
 const AdRevenueLog = require('../models/AdRevenueLog');
 const Withdrawal = require('../models/Withdrawal');
 const Wallet = require('../models/Wallet');
-const { signToken } = require('../utils/jwt');
+const { issueSessionTokens } = require('../utils/authSessions');
 
 async function adminLogin(req, res) {
   try {
-    const { email, password } = req.body;
+    const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    const { password } = req.body;
     if (!email || !password) {
       return res.status(400).json({ error: 'email and password are required' });
     }
 
-    const admin = await User.findOne({ email, role: 'admin' });
+    const admin = await User.findOne({ email, role: 'admin' }).select('+passwordHash');
     if (!admin) return res.status(401).json({ error: 'Invalid credentials' });
     const valid = await bcrypt.compare(password, admin.passwordHash);
     if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
@@ -22,8 +23,7 @@ async function adminLogin(req, res) {
       return res.status(403).json({ error: 'Admin account is blocked' });
     }
 
-    const token = signToken({ userId: admin._id });
-    return res.json({ token });
+    return res.json(await issueSessionTokens(admin, 'admin'));
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -70,7 +70,9 @@ async function listUsers(req, res) {
       { mobileNumber: new RegExp(search, 'i') },
     ];
   }
-  const users = await User.find(filter).select('-passwordHash -otpCode').sort({ createdAt: -1 });
+  const users = await User.find(filter)
+    .select('-passwordHash -otpCode -otpCodeHash -otpAttempts -otpSentAt -otpWindowStartedAt -otpSendCount')
+    .sort({ createdAt: -1 });
   return res.json({ users });
 }
 async function setUserStatus(req, res) {

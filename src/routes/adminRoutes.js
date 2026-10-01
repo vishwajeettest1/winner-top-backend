@@ -1,5 +1,5 @@
 const express = require('express');
-const { requireAuth, requireAdmin } = require('../middleware/auth');
+const { requireAdminAuth, requireAdmin } = require('../middleware/auth');
 const admin = require('../controllers/adminController');
 
 const router = express.Router();
@@ -7,7 +7,7 @@ const router = express.Router();
 router.post('/login', admin.adminLogin);
 
 // All routes below require a valid admin JWT.
-router.use(requireAuth, requireAdmin);
+router.use(requireAdminAuth, requireAdmin);
 
 router.get('/videos', admin.listVideos);
 router.post('/videos', admin.createVideo);

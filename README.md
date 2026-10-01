@@ -4,7 +4,7 @@ Express and MongoDB API for the Winner Top 1 / StreamEarn rewarded-video applica
 
 ## Implementation Status
 
-This repository contains a backend scaffold with authentication, video rewards, reward-ledger entries, withdrawal requests, and Razorpay starter-payment endpoints. The fixed `$25` starter order is quoted in INR and activates the plan only after server-side payment confirmation. OTP delivery, full-watch verification, complete financial ledger coverage, and some ad-network callback integrations remain incomplete. See [BACKEND_REQUIREMENTS.md](BACKEND_REQUIREMENTS.md) for the target contract and remaining acceptance criteria.
+This repository contains a backend scaffold with registration, OTP verification, role-separated authentication, video rewards, reward-ledger entries, withdrawal requests, and Razorpay starter-payment endpoints. OTP delivery is supported through configured SMTP email or Twilio SMS. Full-watch verification, complete financial ledger coverage, and some ad-network callback integrations remain incomplete. See [BACKEND_REQUIREMENTS.md](BACKEND_REQUIREMENTS.md) for the target contract and remaining acceptance criteria.
 
 ## Requirements
 
@@ -23,12 +23,19 @@ Create a `.env` file in the project root. Minimum configuration:
 
 ```dotenv
 PORT=5000
-MONGO_URI=mongodb://localhost:27017/streamearn
-JWT_SECRET=replace-with-a-long-random-secret
-JWT_EXPIRES_IN=7d
+MONGO_URI=mongodb://localhost:27017/streamearn?replicaSet=rs0
+JWT_USER_SECRET=replace-with-at-least-32-random-characters
+JWT_ADMIN_SECRET=use-a-different-secret-of-at-least-32-characters
+ACCESS_TOKEN_TTL=15m
+REFRESH_TOKEN_TTL_DAYS=30
 RAZORPAY_KEY_ID=rzp_test_replace_me
 RAZORPAY_KEY_SECRET=replace-with-test-key-secret
 RAZORPAY_WEBHOOK_SECRET=replace-with-test-webhook-secret
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USER=your_smtp_username
+SMTP_PASSWORD=your_smtp_password
+OTP_FROM_EMAIL=no-reply@example.com
 ```
 
 Start the API:
@@ -37,16 +44,28 @@ Start the API:
 npm run dev
 ```
 
-The API listens on `http://localhost:5000` by default. Check `GET /health` to verify the process is responding. `npm start` runs the service without nodemon.
+The API listens on `http://localhost:5000` by default. Check `GET /health` to verify the process is responding. `npm start` runs the service without nodemon. See `.env.example` for the complete SMTP and Twilio configuration options.
 
 ## Configuration
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` | `5000` | HTTP listener port |
-| `MONGO_URI` | `mongodb://localhost:27017/streamearn` | MongoDB connection string |
-| `JWT_SECRET` | None | Secret used to sign and verify bearer tokens; required for authentication |
-| `JWT_EXPIRES_IN` | `7d` | JWT lifetime |
+| `MONGO_URI` | `mongodb://localhost:27017/streamearn?replicaSet=rs0` | Replica-set MongoDB connection string |
+| `JWT_USER_SECRET` | None | User access-token signing secret; at least 32 characters |
+| `JWT_ADMIN_SECRET` | None | Separate admin access-token signing secret; at least 32 characters and different from the user secret |
+| `ACCESS_TOKEN_TTL` | `15m` | Short-lived access-token lifetime |
+| `REFRESH_TOKEN_TTL_DAYS` | `30` | Refresh-session lifetime in days |
+| `PHONE_DEFAULT_REGION` | `IN` | Region used to normalize national-format phone numbers |
+| `SMTP_HOST` | None | SMTP server for email OTP delivery |
+| `SMTP_PORT` | `587` | SMTP server port |
+| `SMTP_SECURE` | `false` | Use implicit TLS when set to `true` |
+| `SMTP_USER` | None | SMTP username |
+| `SMTP_PASSWORD` | None | SMTP password |
+| `OTP_FROM_EMAIL` | None | Verified sender address for email OTPs |
+| `TWILIO_ACCOUNT_SID` | None | Twilio account SID for SMS OTP delivery |
+| `TWILIO_AUTH_TOKEN` | None | Server-only Twilio auth token |
+| `TWILIO_FROM_NUMBER` | None | Twilio SMS-enabled sender number |
 | `PUBLIC_APP_URL` | `https://app.example.com` | Base URL used to build referral links |
 | `USD_INR_RATE_URL` | `https://open.er-api.com/v6/latest/USD` | Server-side USD exchange-rate endpoint used for conversion quotes |
 | `RAZORPAY_KEY_ID` | None | Razorpay API key ID; returned to the client for Checkout |
@@ -60,7 +79,7 @@ The API listens on `http://localhost:5000` by default. Check `GET /health` to ve
 | `ADMIN_EMAIL` | None | Email for the `create-admin` command |
 | `ADMIN_PASSWORD` | None | Password for the `create-admin` command; must be at least 8 characters |
 
-The current code also uses `NODE_ENV` to decide whether registration responses include a development OTP. Never run with a production configuration that exposes OTPs. Never expose `RAZORPAY_KEY_SECRET` or `RAZORPAY_WEBHOOK_SECRET` to the client.
+OTP codes are never returned by registration or resend endpoints. Registration defaults to email; pass `otpChannel: "sms"` to request Twilio delivery. Configure the corresponding provider credentials before use. Never expose JWT signing secrets, SMTP/Twilio credentials, or Razorpay secrets to clients.
 
 Wallet and withdrawal amounts are denominated in USD. The currency quote endpoint converts a USD amount to INR using the configured exchange-rate service and caches the rate for one hour. It is a quote only; it does not create or confirm a UPI payment or payout.
 
@@ -71,9 +90,12 @@ All API endpoints are under `/api` unless shown otherwise. Protected endpoints r
 | Method | Endpoint | Access | Purpose |
 |---|---|---|---|
 | `GET` | `/health` | Public | Process health response |
-| `POST` | `/api/auth/register` | Public | Create an unverified account and development OTP |
-| `POST` | `/api/auth/verify-otp` | Public | Verify OTP and issue a user JWT |
-| `POST` | `/api/auth/login` | Public | Authenticate a verified active user |
+| `POST` | `/api/auth/register` | Public | Validate details, bcrypt-hash the password, and deliver an OTP |
+| `POST` | `/api/auth/verify-otp` | Public | Verify a one-time OTP and issue user access/refresh tokens |
+| `POST` | `/api/auth/resend-otp` | Public | Resend an OTP subject to cooldown and hourly limits |
+| `POST` | `/api/auth/login` | Public | Authenticate a verified active user and issue user access/refresh tokens |
+| `POST` | `/api/auth/refresh` | Public | Rotate a refresh token and issue a new access token |
+| `POST` | `/api/auth/logout` | Public | Revoke a refresh token |
 | `GET` | `/api/user/profile` | User | Get the authenticated profile |
 | `GET` | `/api/videos/daily` | User | List active ad placements and eligible sponsored campaigns |
 | `POST` | `/api/videos/complete` | User | Attempt to credit a video reward |
@@ -89,7 +111,7 @@ All API endpoints are under `/api` unless shown otherwise. Protected endpoints r
 | `GET` | `/api/withdrawals/history` | User | Get the user's withdrawal records |
 | `POST` | `/api/ad-callbacks/admob-ssv` | Callback | AdMob callback placeholder; currently returns `501` |
 | `POST` | `/api/ad-callbacks/unity-ads-ssv` | Callback | Unity Ads callback scaffold; currently returns `501` |
-| `POST` | `/api/admin/login` | Public, rate limited | Authenticate an admin account |
+| `POST` | `/api/admin/login` | Public, rate limited | Authenticate an admin account and issue an admin-only access/refresh pair |
 | `GET/POST` | `/api/admin/videos` | Admin | List or create ad-network placements |
 | `PUT` | `/api/admin/videos/:id` | Admin | Update an ad-network placement |
 | `GET/POST` | `/api/admin/sponsored-content` | Admin | List or create sponsored campaigns |
@@ -138,9 +160,10 @@ src/utils/                Referral-code and JWT helpers
 | `npm run dev` | Start with nodemon |
 | `npm start` | Start the API |
 | `npm run create-admin` | Create an admin account |
-| `npm test` | Run payment-signature unit tests |
+| `npm run migrate-auth` | Remove legacy plaintext OTPs from existing accounts; run once before deploying the new auth flow |
+| `npm test` | Run authentication-token and payment-signature unit tests |
 
-Reward and payment posting use MongoDB transactions, so configure local MongoDB as a replica set as well as using a replica-set-capable deployment. The current tests cover signature validation only; an end-to-end payment test requires Razorpay test keys and a reachable webhook URL.
+Reward, payment, and OTP-verification session creation use MongoDB transactions, so configure local MongoDB as a replica set as well as using a replica-set-capable deployment. Unit tests cover token separation and payment-signature validation; provider delivery and gateway end-to-end tests require SMTP/Twilio credentials or Razorpay test keys and a reachable webhook URL.
 
 ## Production Warning
 
