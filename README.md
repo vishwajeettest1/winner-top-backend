@@ -52,8 +52,8 @@ The API listens on `http://localhost:5000` by default. Check `GET /health` to ve
 |---|---|---|
 | `PORT` | `5000` | HTTP listener port |
 | `MONGO_URI` | `mongodb://localhost:27017/streamearn?replicaSet=rs0` | Replica-set MongoDB connection string |
-| `JWT_USER_SECRET` | None | User access-token signing secret; at least 32 characters |
-| `JWT_ADMIN_SECRET` | None | Separate admin access-token signing secret; at least 32 characters and different from the user secret |
+| `JWT_USER_SECRET` | None | Recommended user access-token signing secret; at least 32 characters |
+| `JWT_ADMIN_SECRET` | None | Recommended separate admin signing secret; at least 32 characters and different from the user secret |
 | `ACCESS_TOKEN_TTL` | `15m` | Short-lived access-token lifetime |
 | `REFRESH_TOKEN_TTL_DAYS` | `30` | Refresh-session lifetime in days |
 | `PHONE_DEFAULT_REGION` | `IN` | Region used to normalize national-format phone numbers |
@@ -80,6 +80,8 @@ The API listens on `http://localhost:5000` by default. Check `GET /health` to ve
 | `ADMIN_PASSWORD` | None | Password for the `create-admin` command; must be at least 8 characters |
 
 OTP codes are never returned by registration or resend endpoints. Registration defaults to email; pass `otpChannel: "sms"` to request Twilio delivery. Configure the corresponding provider credentials before use. Never expose JWT signing secrets, SMTP/Twilio credentials, or Razorpay secrets to clients.
+
+For backwards compatibility, if both role-specific JWT variables are absent, a `JWT_SECRET` of at least 32 characters is domain-separated into distinct user/admin signing keys. Configure explicit `JWT_USER_SECRET` and `JWT_ADMIN_SECRET` values and remove `JWT_SECRET` when practical so the keys can be rotated independently.
 
 Wallet and withdrawal amounts are denominated in USD. The currency quote endpoint converts a USD amount to INR using the configured exchange-rate service and caches the rate for one hour. It is a quote only; it does not create or confirm a UPI payment or payout.
 

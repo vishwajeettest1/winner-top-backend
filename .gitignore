@@ -18,6 +18,7 @@ pids/
 *.pid
 coverage/
 dist/
+uploads/
 
 # Local editor and operating system files
 .vscode/

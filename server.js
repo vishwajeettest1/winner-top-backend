@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
+const path = require('node:path');
 const connectDB = require('./src/config/db');
 
 const authRoutes = require('./src/routes/authRoutes');
@@ -14,6 +15,7 @@ const adCallbackRoutes = require('./src/routes/adCallbackRoutes');
 const adminRoutes = require('./src/routes/adminRoutes');
 const currencyRoutes = require('./src/routes/currencyRoutes');
 const paymentRoutes = require('./src/routes/paymentRoutes');
+const depositOptionRoutes = require('./src/routes/depositOptionRoutes');
 
 const app = express();
 
@@ -25,6 +27,14 @@ app.use(express.json({
     }
   },
 }));
+app.use(
+  '/uploads/deposit-qr',
+  express.static(path.join(__dirname, 'uploads', 'deposit-qr'), {
+    dotfiles: 'deny',
+    index: false,
+    maxAge: '1h',
+  })
+);
 
 // Basic abuse protection on auth endpoints.
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30 });
@@ -41,6 +51,7 @@ app.use('/api/ad-callbacks', adCallbackRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/currency', currencyRoutes);
 app.use('/api/payments', paymentRoutes);
+app.use('/api/deposit-options', depositOptionRoutes);
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 

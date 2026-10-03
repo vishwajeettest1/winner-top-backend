@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 
 const JWT_ISSUER = 'winner-top-api';
@@ -6,8 +7,17 @@ const ACCESS_TOKEN_TTL = process.env.ACCESS_TOKEN_TTL || '15m';
 function getSecret(role) {
   const userSecret = process.env.JWT_USER_SECRET;
   const adminSecret = process.env.JWT_ADMIN_SECRET;
+  if (!userSecret && !adminSecret) {
+    const legacySecret = process.env.JWT_SECRET;
+    if (legacySecret && legacySecret.length >= 32) {
+      return crypto
+        .createHmac('sha256', legacySecret)
+        .update(`winner-top-api:${role}:access-v1`)
+        .digest('hex');
+    }
+  }
   if (!userSecret || !adminSecret || userSecret.length < 32 || adminSecret.length < 32) {
-    throw new Error('JWT_USER_SECRET and JWT_ADMIN_SECRET must each be at least 32 characters');
+    throw new Error('Configure distinct JWT_USER_SECRET and JWT_ADMIN_SECRET values of at least 32 characters');
   }
   if (userSecret === adminSecret) {
     throw new Error('JWT_USER_SECRET and JWT_ADMIN_SECRET must be different');
