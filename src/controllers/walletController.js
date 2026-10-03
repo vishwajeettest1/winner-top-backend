@@ -41,6 +41,7 @@ async function getTransactions(req, res) {
         amount: proof.amountUsd,
         status: proof.status,
         utrNumber: proof.utrNumber,
+        rejectionReason: proof.rejectionReason,
         createdAt: proof.createdAt,
       })),
       ...ledgerEntries
