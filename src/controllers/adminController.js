@@ -1,10 +1,12 @@
 const bcrypt = require('bcryptjs');
+const mongoose = require('mongoose');
 const User = require('../models/User');
 const Video = require('../models/Video');
 const SponsoredContent = require('../models/SponsoredContent');
 const AdRevenueLog = require('../models/AdRevenueLog');
 const Withdrawal = require('../models/Withdrawal');
 const Wallet = require('../models/Wallet');
+const ContactRequest = require('../models/ContactRequest');
 const { issueSessionTokens } = require('../utils/authSessions');
 
 async function adminLogin(req, res) {
@@ -122,50 +124,95 @@ async function getLedger(req, res) {
 }
 
 // --- Withdrawal approvals ---
+class ReviewError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+
+const WITHDRAWAL_STATUSES = ['PENDING', 'UNDER_REVIEW', 'APPROVED', 'REJECTED', 'PAID'];
+
 async function listWithdrawals(req, res) {
-  const { status = 'PENDING' } = req.query;
-  const withdrawals = await Withdrawal.find({ status }).populate('userId', 'email mobileNumber');
+  const status = String(req.query.status || 'ALL').toUpperCase();
+  if (status !== 'ALL' && !WITHDRAWAL_STATUSES.includes(status)) {
+    return res.status(400).json({ error: 'Invalid status filter' });
+  }
+  const filter = status === 'ALL' ? {} : { status };
+  const withdrawals = await Withdrawal.find(filter)
+    .sort({ requestedAt: -1 })
+    .populate('userId', 'email mobileNumber');
   return res.json({ withdrawals });
 }
 
 async function reviewWithdrawal(req, res) {
-  try {
-    const { action, transactionRef, rejectionReason } = req.body; // action: 'APPROVE' | 'REJECT'
-    const withdrawal = await Withdrawal.findById(req.params.id);
-    if (!withdrawal) return res.status(404).json({ error: 'Withdrawal not found' });
-    if (withdrawal.status !== 'PENDING' && withdrawal.status !== 'UNDER_REVIEW') {
-      return res.status(400).json({ error: 'Withdrawal already processed' });
-    }
+  const { action } = req.body; // action: 'APPROVE' | 'REJECT'
+  const transactionRef = typeof req.body.transactionRef === 'string' ? req.body.transactionRef.trim() : '';
+  const rejectionReason = typeof req.body.rejectionReason === 'string' ? req.body.rejectionReason.trim() : '';
 
-    if (action === 'APPROVE') {
-      withdrawal.status = 'PAID';
-      withdrawal.reviewedAt = new Date();
-      withdrawal.paidAt = new Date();
-      withdrawal.transactionRef = transactionRef || null;
-      await withdrawal.save();
-      await Wallet.updateOne(
-        { userId: withdrawal.userId },
-        { $inc: { totalBalance: -withdrawal.amount, pendingWithdrawal: -withdrawal.amount } }
-      );
-    } else if (action === 'REJECT') {
-      withdrawal.status = 'REJECTED';
-      withdrawal.reviewedAt = new Date();
-      withdrawal.rejectionReason = rejectionReason || 'Not specified';
-      await withdrawal.save();
-      await Wallet.updateOne(
-        { userId: withdrawal.userId },
-        { $inc: { pendingWithdrawal: -withdrawal.amount } }
-      );
-    } else {
-      return res.status(400).json({ error: "action must be 'APPROVE' or 'REJECT'" });
-    }
-
-    return res.json({ withdrawal });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
+  if (action !== 'APPROVE' && action !== 'REJECT') {
+    return res.status(400).json({ error: "action must be 'APPROVE' or 'REJECT'" });
   }
-}
+  if (action === 'REJECT' && !rejectionReason) {
+    return res.status(400).json({ error: 'A remark is required to reject a withdrawal' });
+  }
+  if (rejectionReason.length > 500 || transactionRef.length > 120) {
+    return res.status(400).json({ error: 'Remark or transaction reference is too long' });
+  }
 
+  const session = await mongoose.startSession();
+  let result;
+  try {
+    await session.withTransaction(async () => {
+      result = null;
+      const now = new Date();
+      const update =
+        action === 'APPROVE'
+          ? { status: 'APPROVED', reviewedAt: now, transactionRef: transactionRef || null }
+          : { status: 'REJECTED', reviewedAt: now, rejectionReason };
+
+      // Only a request that is still open can be processed, so repeats are no-ops.
+      const withdrawal = await Withdrawal.findOneAndUpdate(
+        { _id: req.params.id, status: { $in: ['PENDING', 'UNDER_REVIEW'] } },
+        { $set: update },
+        { new: true, session }
+      );
+      if (!withdrawal) {
+        const exists = await Withdrawal.exists({ _id: req.params.id }).session(session);
+        result = exists
+          ? { code: 400, body: { error: 'Withdrawal already processed' } }
+          : { code: 404, body: { error: 'Withdrawal not found' } };
+        return;
+      }
+
+      const walletUpdate =
+        action === 'APPROVE'
+          ? await Wallet.updateOne(
+              { userId: withdrawal.userId, totalBalance: { $gte: withdrawal.amount } },
+              { $inc: { totalBalance: -withdrawal.amount, pendingWithdrawal: -withdrawal.amount } },
+              { session }
+            )
+          : await Wallet.updateOne(
+              { userId: withdrawal.userId },
+              { $inc: { pendingWithdrawal: -withdrawal.amount } },
+              { session }
+            );
+
+      if (!walletUpdate.modifiedCount) {
+        throw new ReviewError(409, 'Wallet balance is too low to approve this withdrawal');
+      }
+      result = { code: 200, body: { withdrawal } };
+    });
+  } catch (err) {
+    if (err instanceof ReviewError) return res.status(err.code).json({ error: err.message });
+    console.error('[admin] Withdrawal review failed:', err.message);
+    return res.status(500).json({ error: 'Unable to review this withdrawal' });
+  } finally {
+    await session.endSession();
+  }
+
+  return res.status(result?.code || 500).json(result?.body || { error: 'Unable to review this withdrawal' });
+}
 // --- Referral settings ---
 async function updateReferralShare(req, res) {
   // In a full implementation this would persist to a Settings collection
@@ -189,4 +236,67 @@ module.exports = {
   listWithdrawals,
   reviewWithdrawal,
   updateReferralShare,
+  listContactRequests,
+  replyToContactRequest,
 };
+
+// --- Contact request management ---
+async function listContactRequests(req, res) {
+  try {
+    const status = String(req.query.status || 'ALL').toUpperCase();
+    const validStatuses = ['OPEN', 'IN_PROGRESS', 'RESOLVED'];
+    const filter = validStatuses.includes(status) ? { status } : {};
+
+    const requests = await ContactRequest.find(filter).sort({ createdAt: -1 });
+
+    const counts = {
+      ALL: await ContactRequest.countDocuments(),
+      OPEN: await ContactRequest.countDocuments({ status: 'OPEN' }),
+      IN_PROGRESS: await ContactRequest.countDocuments({ status: 'IN_PROGRESS' }),
+      RESOLVED: await ContactRequest.countDocuments({ status: 'RESOLVED' }),
+    };
+
+    return res.json({ requests, counts });
+  } catch (error) {
+    console.error('[admin] List contact requests failed:', error.message);
+    return res.status(500).json({ error: 'Unable to fetch contact requests' });
+  }
+}
+
+async function replyToContactRequest(req, res) {
+  try {
+    const { id } = req.params;
+    const { adminReply, status } = req.body;
+
+    if (typeof adminReply !== 'string' || adminReply.trim().length === 0) {
+      return res.status(400).json({ error: 'Admin reply is required' });
+    }
+    if (adminReply.length > 5000) {
+      return res.status(400).json({ error: 'Reply must be 5000 characters or less' });
+    }
+
+    const validStatuses = ['OPEN', 'IN_PROGRESS', 'RESOLVED'];
+    const newStatus = validStatuses.includes(status) ? status : 'IN_PROGRESS';
+
+    const request = await ContactRequest.findByIdAndUpdate(
+      id,
+      {
+        adminReply: adminReply.trim(),
+        status: newStatus,
+        repliedBy: req.user._id,
+        repliedAt: new Date(),
+      },
+      { new: true }
+    );
+
+    if (!request) {
+      return res.status(404).json({ error: 'Contact request not found' });
+    }
+
+    return res.json({ message: 'Reply sent', request });
+  } catch (error) {
+    console.error('[admin] Reply to contact request failed:', error.message);
+    return res.status(500).json({ error: 'Unable to send reply' });
+  }
+}
+

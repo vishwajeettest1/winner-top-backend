@@ -34,6 +34,10 @@ router.get('/ledger', admin.getLedger);
 
 router.get('/withdrawals', admin.listWithdrawals);
 router.put('/withdrawals/:id', admin.reviewWithdrawal);
+router.patch('/withdrawals/:id', admin.reviewWithdrawal);
+
+router.get('/contact-requests', admin.listContactRequests);
+router.patch('/contact-requests/:id', admin.replyToContactRequest);
 
 router.put('/settings/referral-share', admin.updateReferralShare);
 

@@ -21,6 +21,9 @@ const userSchema = new mongoose.Schema(
     referralCode: { type: String, required: true, unique: true },
     referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
 
+    payoutMethod: { type: String, enum: ['UPI', 'BANK'], default: null },
+    payoutDetails: { type: mongoose.Schema.Types.Mixed, default: null, select: false },
+
     status: { type: String, enum: ['ACTIVE', 'BLOCKED'], default: 'ACTIVE' },
 
     role: { type: String, enum: ['user', 'admin'], default: 'user' },

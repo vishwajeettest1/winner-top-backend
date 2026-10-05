@@ -1,5 +1,6 @@
 const Wallet = require('../models/Wallet');
 const Withdrawal = require('../models/Withdrawal');
+const User = require('../models/User');
 
 const MIN_WITHDRAWAL = parseFloat(process.env.MIN_WITHDRAWAL_AMOUNT || '50');
 const WITHDRAWAL_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -14,6 +15,11 @@ async function requestWithdrawal(req, res) {
     }
     if (amount < MIN_WITHDRAWAL) {
       return res.status(400).json({ error: `Minimum withdrawal amount is ${MIN_WITHDRAWAL}` });
+    }
+
+    const user = await User.findById(userId).select('+payoutDetails');
+    if (!user?.payoutMethod || !user.payoutDetails) {
+      return res.status(400).json({ error: 'Add your payout details in Manage Payments before withdrawing' });
     }
 
     const wallet = await Wallet.findOne({ userId });
@@ -44,12 +50,19 @@ async function requestWithdrawal(req, res) {
       return res.status(400).json({ error: 'Amount exceeds available balance' });
     }
 
-    const withdrawal = await Withdrawal.create({ userId, amount, currency: 'USD', status: 'PENDING' });
+    const withdrawal = await Withdrawal.create({
+      userId,
+      amount,
+      currency: 'USD',
+      status: 'PENDING',
+      payoutMethod: user.payoutMethod,
+      payoutDetails: user.payoutDetails,
+    });
     await Wallet.updateOne({ userId }, { $inc: { pendingWithdrawal: amount } });
 
     return res.status(201).json({
       message: 'Withdrawal requested',
-      withdrawal,
+      withdrawal: { ...withdrawal.toObject(), payoutDetails: undefined },
       withdrawalWindow: {
         startedAt: wallet.withdrawalWindowStartedAt,
         requestDeadlineAt: wallet.withdrawalRequestDeadlineAt,
@@ -62,7 +75,9 @@ async function requestWithdrawal(req, res) {
 
 async function getWithdrawalHistory(req, res) {
   try {
-    const withdrawals = await Withdrawal.find({ userId: req.user._id }).sort({ requestedAt: -1 });
+    const withdrawals = await Withdrawal.find({ userId: req.user._id })
+      .select('-payoutDetails')
+      .sort({ requestedAt: -1 });
     return res.json({ withdrawals });
   } catch (err) {
     return res.status(500).json({ error: err.message });
